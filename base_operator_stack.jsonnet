@@ -1,13 +1,15 @@
 local k = import 'ksonnet/ksonnet.beta.3/k.libsonnet';
+local vars = import 'vars.jsonnet';
+
 {
   _config+:: {
     namespace: 'monitoring',
 
     urls+:: {
-      prom_ingress: 'prometheus.internal.carlosedp.com',
-      alert_ingress: 'alertmanager.internal.carlosedp.com',
-      grafana_ingress: 'grafana.internal.carlosedp.com',
-      grafana_ingress_external: 'grafana.cloud.carlosedp.com',
+      prom_ingress: 'prometheus.' + vars.suffixDomain,
+      alert_ingress: 'alertmanager.' + vars.suffixDomain,
+      grafana_ingress: 'grafana.' + vars.suffixDomain,
+      grafana_ingress_external: 'grafana.' + vars.suffixDomain,
     },
 
     prometheus+:: {
@@ -41,13 +43,6 @@ local k = import 'ksonnet/ksonnet.beta.3/k.libsonnet';
     grafana+:: {
       config: {
         sections: {
-          //   database: { path: '/data/grafana.db' },
-          //   paths: {
-          //     data: '/var/lib/grafana',
-          //     logs: '/var/lib/grafana/log',
-          //     plugins: '/var/lib/grafana/plugins',
-          //     provisioning: '/etc/grafana/provisioning',
-          //   },
           session: { provider: 'memory' },
           'auth.basic': { enabled: false },
           'auth.anonymous': { enabled: false },
@@ -56,7 +51,7 @@ local k = import 'ksonnet/ksonnet.beta.3/k.libsonnet';
             host: 'smtp-server.monitoring.svc:25',
             user: '',
             password: '',
-            from_address: 'carlosedp@gmail.com',
+            from_address: vars.grafana.from_address,
             from_name: 'Grafana Alert',
             skip_verify: true,
           },
@@ -69,25 +64,28 @@ local k = import 'ksonnet/ksonnet.beta.3/k.libsonnet';
   //---------------------------------------
 
   prometheus+:: {
+    # Add option (from vars.yaml) to enable persistence
     local pvc = k.core.v1.persistentVolumeClaim,
     prometheus+: {
       spec+: {
-        retention: '15d',
-        externalUrl: 'http://' + $._config.urls.prom_ingress,
-        storage: {
-          volumeClaimTemplate:
-            pvc.new() +
-            pvc.mixin.spec.withAccessModes('ReadWriteOnce') +
-            pvc.mixin.spec.resources.withRequests({ storage: '20Gi' }),
-          // Uncomment below to define a StorageClass name
-          //+ pvc.mixin.spec.withStorageClassName('nfs-master-ssd'),
-        },
-      },
+               retention: '15d',
+               externalUrl: 'http://' + $._config.urls.prom_ingress,
+             }
+             + (if vars.enablePersistence.prometheus then {
+                  storage: {
+                    volumeClaimTemplate:
+                      pvc.new() +
+                      pvc.mixin.spec.withAccessModes('ReadWriteOnce') +
+                      pvc.mixin.spec.resources.withRequests({ storage: '20Gi' }),
+                    // Uncomment below to define a StorageClass name
+                    //+ pvc.mixin.spec.withStorageClassName('nfs-master-ssd'),
+                  },
+                } else {}),
     },
   },
 
   // Override deployment for Grafana data persistence
-  grafana+:: {
+  grafana+:: if vars.enablePersistence.grafana then {
     deployment+: {
       spec+: {
         template+: {
@@ -116,41 +114,9 @@ local k = import 'ksonnet/ksonnet.beta.3/k.libsonnet';
       pvc.mixin.metadata.withName('grafana-storage') +
       pvc.mixin.spec.withAccessModes('ReadWriteMany') +
       pvc.mixin.spec.resources.withRequests({ storage: '2Gi' }),
-  },
+  } else {},
 
   grafanaDashboards+:: $._config.grafanaDashboards,
-
-  kubeStateMetrics+:: {
-    // Override command for addon-resizer due to change from parameter --threshold to --acceptance-offset
-    deployment+: {
-      spec+: {
-        template+: {
-          spec+: {
-            containers:
-              std.map(
-                function(c)
-                  if std.startsWith(c.name, 'addon-resizer') then
-                    c {
-                      command: [
-                        '/pod_nanny',
-                        '--container=kube-state-metrics',
-                        '--cpu=100m',
-                        '--extra-cpu=2m',
-                        '--memory=150Mi',
-                        '--extra-memory=30Mi',
-                        '--acceptance-offset=5',
-                        '--deployment=kube-state-metrics',
-                      ],
-                    }
-                  else
-                    c,
-                super.containers,
-              ),
-          },
-        },
-      },
-    },
-  },
 
   // Create ingress objects per application
   ingress+: {

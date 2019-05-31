@@ -26,7 +26,7 @@ spec:
       namespace: monitoring
       port: web
   baseImage: carlosedp/prometheus
-  externalUrl: http://prometheus.internal.carlosedp.com
+  externalUrl: http://prometheus.192.168.99.100.nip.io
   nodeSelector:
     beta.kubernetes.io/os: linux
   replicas: 1
@@ -45,14 +45,4 @@ spec:
   serviceAccountName: prometheus-k8s
   serviceMonitorNamespaceSelector: {}
   serviceMonitorSelector: {}
-  storage:
-    volumeClaimTemplate:
-      apiVersion: v1
-      kind: PersistentVolumeClaim
-      spec:
-        accessModes:
-        - ReadWriteOnce
-        resources:
-          requests:
-            storage: 20Gi
   version: v2.7.0

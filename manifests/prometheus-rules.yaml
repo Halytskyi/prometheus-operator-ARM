@@ -44,11 +44,44 @@ spec:
       record: namespace_name:kube_pod_container_resource_requests_memory_bytes:sum
     - expr: |
         sum by (namespace, label_name) (
-          sum(kube_pod_container_resource_requests_cpu_cores{job="kube-state-metrics"} and on(pod) kube_pod_status_scheduled{condition="true"}) by (namespace, pod)
+          sum(kube_pod_container_resource_requests_cpu_cores{job="kube-state-metrics"} * on (endpoint, instance, job, namespace, pod, service) group_left(phase) (kube_pod_status_phase{phase=~"^(Pending|Running)$"} == 1)) by (namespace, pod)
         * on (namespace, pod) group_left(label_name)
           label_replace(kube_pod_labels{job="kube-state-metrics"}, "pod_name", "$1", "pod", "(.*)")
         )
       record: namespace_name:kube_pod_container_resource_requests_cpu_cores:sum
+    - expr: |
+        sum(
+          label_replace(
+            label_replace(
+              kube_pod_owner{job="kube-state-metrics", owner_kind="ReplicaSet"},
+              "replicaset", "$1", "owner_name", "(.*)"
+            ) * on(replicaset, namespace) group_left(owner_name) kube_replicaset_owner{job="kube-state-metrics"},
+            "workload", "$1", "owner_name", "(.*)"
+          )
+        ) by (namespace, workload, pod)
+      labels:
+        workload_type: deployment
+      record: mixin_pod_workload
+    - expr: |
+        sum(
+          label_replace(
+            kube_pod_owner{job="kube-state-metrics", owner_kind="DaemonSet"},
+            "workload", "$1", "owner_name", "(.*)"
+          )
+        ) by (namespace, workload, pod)
+      labels:
+        workload_type: daemonset
+      record: mixin_pod_workload
+    - expr: |
+        sum(
+          label_replace(
+            kube_pod_owner{job="kube-state-metrics", owner_kind="StatefulSet"},
+            "workload", "$1", "owner_name", "(.*)"
+          )
+        ) by (namespace, workload, pod)
+      labels:
+        workload_type: statefulset
+      record: mixin_pod_workload
   - name: kube-scheduler.rules
     rules:
     - expr: |
@@ -235,22 +268,22 @@ spec:
         )
       record: node:node_disk_utilisation:avg_irate
     - expr: |
-        avg(irate(node_disk_io_time_weighted_seconds_total{job="node-exporter",device=~"nvme.+|rbd.+|sd.+|vd.+|xvd.+|dm-.+"}[1m]) / 1e3)
+        avg(irate(node_disk_io_time_weighted_seconds_total{job="node-exporter",device=~"nvme.+|rbd.+|sd.+|vd.+|xvd.+|dm-.+"}[1m]))
       record: :node_disk_saturation:avg_irate
     - expr: |
         avg by (node) (
-          irate(node_disk_io_time_weighted_seconds_total{job="node-exporter",device=~"nvme.+|rbd.+|sd.+|vd.+|xvd.+|dm-.+"}[1m]) / 1e3
+          irate(node_disk_io_time_weighted_seconds_total{job="node-exporter",device=~"nvme.+|rbd.+|sd.+|vd.+|xvd.+|dm-.+"}[1m])
         * on (namespace, pod) group_left(node)
           node_namespace_pod:kube_pod_info:
         )
       record: node:node_disk_saturation:avg_irate
     - expr: |
-        max by (namespace, pod, device) ((node_filesystem_size_bytes{fstype=~"ext[234]|btrfs|xfs|zfs"}
+        max by (instance, namespace, pod, device) ((node_filesystem_size_bytes{fstype=~"ext[234]|btrfs|xfs|zfs"}
         - node_filesystem_avail_bytes{fstype=~"ext[234]|btrfs|xfs|zfs"})
         / node_filesystem_size_bytes{fstype=~"ext[234]|btrfs|xfs|zfs"})
       record: 'node:node_filesystem_usage:'
     - expr: |
-        max by (namespace, pod, device) (node_filesystem_avail_bytes{fstype=~"ext[234]|btrfs|xfs|zfs"} / node_filesystem_size_bytes{fstype=~"ext[234]|btrfs|xfs|zfs"})
+        max by (instance, namespace, pod, device) (node_filesystem_avail_bytes{fstype=~"ext[234]|btrfs|xfs|zfs"} / node_filesystem_size_bytes{fstype=~"ext[234]|btrfs|xfs|zfs"})
       record: 'node:node_filesystem_avail:'
     - expr: |
         sum(irate(node_network_receive_bytes_total{job="node-exporter",device!~"veth.+"}[1m])) +
@@ -319,32 +352,6 @@ spec:
     - expr: cluster:node_cpu_seconds_total:rate5m / count(sum(node_cpu_seconds_total)
         BY (instance, cpu))
       record: cluster:node_cpu:ratio
-  - name: elasticsearch-k8s-rules
-    rules:
-    - expr: 100 * (elasticsearch_filesystem_data_size_bytes - elasticsearch_filesystem_data_free_bytes)
-        / elasticsearch_filesystem_data_size_bytes
-      record: elasticsearch_filesystem_data_used_percent
-    - expr: 100 - elasticsearch_filesystem_data_used_percent
-      record: elasticsearch_filesystem_data_free_percent
-    - alert: ElasticsearchTooFewNodesRunning
-      annotations:
-        message: There are only {{$value}} < 3 ElasticSearch nodes running
-        runbook_url: https://github.com/kubernetes-monitoring/kubernetes-mixin/tree/master/runbook.md#alert-name-elasticsearchtoofewnodesrunning
-        summary: ElasticSearch running on less than 3 nodes
-      expr: elasticsearch_cluster_health_number_of_nodes < 3
-      for: 5m
-      labels:
-        severity: critical
-    - alert: ElasticsearchHeapTooHigh
-      annotations:
-        message: The heap usage is over 90% for 15m
-        runbook_url: https://github.com/kubernetes-monitoring/kubernetes-mixin/tree/master/runbook.md#alert-name-elasticsearchheaptoohigh
-        summary: ElasticSearch node {{$labels.node}} heap usage is high
-      expr: elasticsearch_jvm_memory_used_bytes{area="heap"} / elasticsearch_jvm_memory_max_bytes{area="heap"}
-        > 0.9
-      for: 15m
-      labels:
-        severity: critical
   - name: kubernetes-absent
     rules:
     - alert: AlertmanagerDown
@@ -839,7 +846,7 @@ spec:
     - alert: KubeClientCertificateExpiration
       annotations:
         message: A client certificate used to authenticate to the apiserver is expiring
-          in less than 7 days.
+          in less than 7.0 days.
         runbook_url: https://github.com/kubernetes-monitoring/kubernetes-mixin/tree/master/runbook.md#alert-name-kubeclientcertificateexpiration
       expr: |
         apiserver_client_certificate_expiration_seconds_count{job="apiserver"} > 0 and histogram_quantile(0.01, sum by (job, le) (rate(apiserver_client_certificate_expiration_seconds_bucket{job="apiserver"}[5m]))) < 604800
@@ -848,7 +855,7 @@ spec:
     - alert: KubeClientCertificateExpiration
       annotations:
         message: A client certificate used to authenticate to the apiserver is expiring
-          in less than 24 hours.
+          in less than 24.0 hours.
         runbook_url: https://github.com/kubernetes-monitoring/kubernetes-mixin/tree/master/runbook.md#alert-name-kubeclientcertificateexpiration
       expr: |
         apiserver_client_certificate_expiration_seconds_count{job="apiserver"} > 0 and histogram_quantile(0.01, sum by (job, le) (rate(apiserver_client_certificate_expiration_seconds_bucket{job="apiserver"}[5m]))) < 86400
@@ -924,6 +931,46 @@ spec:
       for: 10m
       labels:
         severity: critical
+  - name: node-time
+    rules:
+    - alert: ClockSkewDetected
+      annotations:
+        message: Clock skew detected on node-exporter {{ $labels.namespace }}/{{ $labels.pod
+          }}. Ensure NTP is configured correctly on this host.
+      expr: |
+        abs(node_timex_offset_seconds{job="node-exporter"}) > 0.03
+      for: 2m
+      labels:
+        severity: warning
+  - name: node-network
+    rules:
+    - alert: NetworkReceiveErrors
+      annotations:
+        message: Network interface "{{ $labels.device }}" showing receive errors on
+          node-exporter {{ $labels.namespace }}/{{ $labels.pod }}"
+      expr: |
+        rate(node_network_receive_errs_total{job="node-exporter",device!~"veth.+"}[2m]) > 0
+      for: 2m
+      labels:
+        severity: warning
+    - alert: NetworkTransmitErrors
+      annotations:
+        message: Network interface "{{ $labels.device }}" showing transmit errors
+          on node-exporter {{ $labels.namespace }}/{{ $labels.pod }}"
+      expr: |
+        rate(node_network_transmit_errs_total{job="node-exporter",device!~"veth.+"}[2m]) > 0
+      for: 2m
+      labels:
+        severity: warning
+    - alert: NodeNetworkInterfaceFlapping
+      annotations:
+        message: Network interface "{{ $labels.device }}" changing it's up status
+          often on node-exporter {{ $labels.namespace }}/{{ $labels.pod }}"
+      expr: |
+        changes(node_network_up{job="node-exporter",device!~"veth.+"}[2m]) > 2
+      for: 2m
+      labels:
+        severity: warning
   - name: prometheus.rules
     rules:
     - alert: PrometheusConfigReloadFailed
